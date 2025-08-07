@@ -1,0 +1,9 @@
+build/
+data/
+main.ipynb
+README.md
+__pycache__/
+.idea/
+sifting/build/
+cache/
+sifting.cp311-win_amd64.pyd
