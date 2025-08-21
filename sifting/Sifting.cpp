@@ -1,7 +1,7 @@
 #include "Parser.h"
 #include "FenwickTree.h"
-#include "FFTree.h"
 #include "Sifting.h"
+#include "set"
 
 std::vector<int> calcPhotons(Photon* photons, size_t n, double selectionTime, std::vector<bool> &chosenIndexes, int maxx, int maxy, int localPsf) {
     bool f = selectionTime != 0;
@@ -14,7 +14,6 @@ std::vector<int> calcPhotons(Photon* photons, size_t n, double selectionTime, st
         arr = new Photon[0]();
     }
     FenwickTree ft = FenwickTree(arr, (f) ? (0) : (n), maxx, maxy);
-    // std::cerr << n << std::endl;
     std::vector<int> result = std::vector<int>(n);
     size_t left = 0;
     size_t right = 0;
@@ -55,7 +54,6 @@ py::array_t<int> calc(std::vector<double> &x, std::vector<double> &y, std::vecto
 }
 
 bool checkTime(double timem, double times, double timed, double timemin, double timemax) {
-    // timed /= 2;
     if (timem - timed < timemin) {
         return times - timemin <= 2 * timed;
     }
@@ -64,6 +62,7 @@ bool checkTime(double timem, double times, double timed, double timemin, double 
     }
     return abs(times - timem) <= timed;
 }
+
 py::array_t<int> count(std::vector<double> &xm, std::vector<double> &ym, std::vector<double> &timem, std::vector<double> &timed, std::vector<double> &xs, std::vector<double> &ys, std::vector<double> &times, double localPsf, double innerSigmaCoefficient, double outerSigmaCoefficient, double timeCoefficient) {
     size_t n = xm.size();
     std::vector<int> cnt = std::vector<int>(2 * n, 0);
@@ -93,62 +92,72 @@ py::array_t<int> count(std::vector<double> &xm, std::vector<double> &ym, std::ve
     return vector_as_array_nocopy(cnt);
 }
 
+void removeElement(std::multiset<std::pair<double, int>> &probset, std::multiset<std::pair<double, int>> &timeset, int ind, std::vector<double> &prob, std::vector<double> &time) {
+    probset.erase({-prob[ind], ind});
+    timeset.erase({time[ind], ind});
+}
+
 py::array_t<int> clustering(std::vector<double> &x, std::vector<double> &y, std::vector<double> &time, std::vector<double> &prob, int localPsf, int timeCoeff) {
-//    freopen("./cache/cout.txt", "w", stdout);
-//    std::cout << std::fixed << std::showpoint;
-//    std::cout << std::setprecision(2);
-    int n = x.size();
+    size_t n = x.size();
     int groupNum = 0;
     int eventsLeft = n;
-    std::vector<std::vector<double>> elements(n);
-    double maxpr = 0;
+    std::multiset<std::pair<double, int>> probset;
+    std::multiset<std::pair<double, int>> timeset;
     for (int i = 0; i < n; ++i) {
-        elements[i] = {time[i], prob[i]};
-        maxpr = std::max(maxpr, prob[i]);
+        probset.insert({-prob[i], i});
+        timeset.insert({time[i], i});
     }
-    FFTree tree = FFTree(elements, n);
     std::vector<int> cluster(n);
-    int root = tree.ns - 1;
     while (eventsLeft) {
-        int start = tree.getProb(root, tree.arr[tree.ns - 1].maxprob);
-//        std::cout << start << std::endl;
-        std::pair<double, int> left, right, prev;
-        left = tree.arr[start].time;
+        int start = probset.begin()->second;
+        int left, right, prev;
+        left = start;
         right = left;
         prev = left;
         cluster[start] = groupNum;
+        removeElement(probset, timeset, start, prob, time);
         eventsLeft--;
-        tree.remove(root, left);
         while (true) {
-            int candidate = tree.getLater(root, prev);
-            if (tree.arr[candidate].time.first - right.first > timeCoeff) {
+            std::multiset<std::pair<double, int>>::iterator canditer = timeset.upper_bound({time[prev], prev});
+            if (canditer == timeset.end()) {
                 break;
             }
-            prev = tree.arr[candidate].time;
+            int candidate = canditer->second;
+            if (time[candidate] - time[right] > timeCoeff) {
+                break;
+            }
+            prev = candidate;
             if ((x[start] - x[candidate]) * (x[start] - x[candidate])
                 + (y[start] - y[candidate]) * (y[start] - y[candidate]) <= localPsf * localPsf) {
                 cluster[candidate] = groupNum;
                 eventsLeft--;
                 right = prev;
-                tree.remove(root, right);
+                removeElement(probset, timeset, prev, prob, time);
             }
         }
         prev = left;
         while (true) {
-            int candidate = tree.getEarlier(root, prev);
-            if (left.first - tree.arr[candidate].time.first > timeCoeff) {
+            std::multiset<std::pair<double, int>>::iterator canditer = timeset.lower_bound({time[prev], prev});
+            if (canditer == timeset.begin()) {
+                break;
+            } else {
+                canditer--;
+            }
+            int candidate = canditer->second;
+            if (time[left] - time[candidate] > timeCoeff) {
                 break;
             }
-            prev = tree.arr[candidate].time;
+            prev = candidate;
             if ((x[start] - x[candidate]) * (x[start] - x[candidate])
                 + (y[start] - y[candidate]) * (y[start] - y[candidate]) <= localPsf * localPsf) {
                 cluster[candidate] = groupNum;
                 eventsLeft--;
                 left = prev;
-                tree.remove(root, left);
+                removeElement(probset, timeset, prev, prob, time);
             }
         }
         groupNum++;
     }
+
     return vector_as_array_nocopy(cluster);
 }
