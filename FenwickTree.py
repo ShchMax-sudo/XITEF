@@ -47,3 +47,4 @@ class FenwickTree:
 
     def count(self, x1: int, x2: int, y1: int, y2: int):
         return self.sum(x2, y2) - self.sum(x2, y1 - 1) - self.sum(x1 - 1, y2) + self.sum(x1 - 1, y1 - 1)
+    

@@ -1,74 +1,311 @@
+from multiprocessing import current_process, Pool, Manager
+from time import time
+import sys
+import traceback
+from copy import deepcopy
+import gc
+import os
+from urllib.request import urlretrieve
+from tqdm import tqdm
+import pandas as pd
 import Calc
-import multiprocessing
-from time import time, sleep
 
-def run(ind, dur, prob, obsID, sumtime, success, found):
-    conf = Calc.Config()
-    conf.ftransientProb = prob
-    conf.ftransientTime = dur
-    conf.addFakeTransient = True
-    tf = Calc.TransientFinder(obsID, conf)
-    tf.process()
-    sumtime.value += tf.result["CodeTime"]
-    success.value += tf.result["FakeTransientStatus"] == "Probable"
-    found.value += tf.result["FakeTransientStatus"] != "NotFound"
-    print(ind, end=" ")
-    del tf
+panic = None
+args = {
+    "XMMMaster": r"https://nxsa.esac.esa.int/ftp_public/heasarc_obslog/xsaobslog.txt",
+    "allowedModes": "PN-FF, PN-EFF, PN-LW, PN-SW, PN-FMK",
+    "debug": "n",
+}
 
-def emptyFunc():
-    pass
+
+class Task:
+    ID: str
+    conf: Calc.Config
+
+    def __init__(self, ID: str, conf: Calc.Config):
+        self.ID = ID
+        self.conf = conf
+
+    def run(self, filelock, filepath, panic, onSuccess, success, onFail, onException, repeat):
+        try:
+            cntSuccess = 0
+            cntFail = 0
+            for _ in range(max(repeat, 1)):
+                tf = Calc.TransientFinder(self.ID, self.conf)
+                tf.process()
+                filelock.acquire()
+                if success(tf.result):
+                    if repeat == 0:
+                        onSuccess(tf.result, filepath, self.ID)
+                    else:
+                        cntSuccess += 1
+                else:
+                    onFail(tf.result, filepath, self.ID)
+                    if repeat == 0:
+                        panic.value = 1
+                    else:
+                        cntFail += 1
+                del tf
+                filelock.release()
+                gc.collect()
+        except Exception:
+            filelock.acquire()
+            onException(filepath, self.ID)
+            panic.value = 1
+            filelock.release()
+        if repeat != 0:
+            onSuccess(filepath, self.ID, cntSuccess, cntFail,
+                      self.conf.ftransientProb, self.conf.ftransientTime)
+
+    @staticmethod
+    def processingSuccess(result):
+        return result["type"] == "Success"
+
+    @staticmethod
+    def processingOnSuccess(result, filepath, ID):
+        with open(filepath, "a") as file:
+            print(f"#{ID} {round(result['CodeTime'])}", file=file)
+            for transient in result["transients"]:
+                print(*[ transient[val] for val in ["x", "y", "tmean", "tdev",
+                                                    "cntGTI", "backgroundGTI",
+                                                    "cntBTI", "backgroundBTI",
+                                                    "prob"]], file=file)
+
+    @staticmethod
+    def processingOnFail(result, filepath, ID):
+        with open(filepath, "a") as file:
+            print(f"~{ID} {result['type']}", file=file)
+
+    @staticmethod
+    def processingOnException(filepath, ID):
+        with open(filepath, "a") as file:
+            print(f"!{ID}", file=file)
+            print(traceback.format_exc(), file=file)
+
+    @staticmethod
+    def fakeSuccess(result):
+        return (
+            result["type"] == "Success" and result["FakeTransientStatus"] == "Probable"
+        )
+
+    @staticmethod
+    def fakeOnSuccess(filepath, ID, cntSuccess, cntFail, prob, dur):
+        with open(filepath, "a") as file:
+            print(
+                f"#{ID} probability {prob} duration {dur} sucess rate:" +
+                f"{round((cntSuccess / (cntSuccess + cntFail)) * 100)}%",
+                file=file,
+            )
+
+    @staticmethod
+    def fakeOnFail(result=None, filepath=None, ID=None):
+        pass
+
+    @staticmethod
+    def fakeOnException(filepath, ID):
+        with open(filepath, "a") as file:
+            print(f"!{ID}", file=file)
+            print(traceback.format_exc(), file=file)
+
+
+def processor(task, filelock, filepath, panic, onSuccess, success, onFail,
+              onException, repeat=0):
+    global args
+
+    ind = current_process().name
+    if not panic.value:
+        if args["debug"] == "y":
+            print(f"Process {ind} started {task.ID}")
+        task.run(filelock, filepath, panic, onSuccess, success, onFail, onException, repeat)
+        if args["debug"] == "y":
+            print(f"Process {ind} finished {task.ID}")
+
+
+def processorWrapper(args):
+    processor(*args)
+
+
+def processImages(obsIDs, coreNum, conf, filelock, filepath, panic):
+    tasks = []
+
+    for ID in obsIDs:
+        tasks.append(Task(ID, conf))
+
+    with Pool(coreNum) as pool:
+        list(
+            tqdm(
+                pool.imap_unordered(
+                    processorWrapper,
+                    [(task, filelock, filepath, panic, Task.processingOnSuccess,
+                      Task.processingSuccess, Task.processingOnFail,
+                      Task.processingOnException) for task in tasks],
+                ),
+                total=len(tasks),
+            )
+        )
+
+
+def fakeImages(obsIDs, coreNum, conf, filelock, filepath, panic, lens, pglobs, repeats):
+    tasks = []
+
+    for ID in obsIDs:
+        for length in lens.split(","):
+            for pglob in pglobs.split(","):
+                confcurr = deepcopy(conf)
+                confcurr.addFakeTransient = True
+                confcurr.ftransientTime = float(length)
+                confcurr.ftransientProb = float(pglob)
+                tasks.append(Task(ID, confcurr))
+
+    with Pool(coreNum) as pool:
+        list(
+            tqdm(
+                pool.imap_unordered(
+                    processorWrapper,
+                    [(task, filelock, filepath, panic, Task.fakeOnSuccess,
+                      Task.fakeSuccess, Task.fakeOnFail, Task.fakeOnException,
+                      int(repeats)) for task in tasks],
+                ),
+                total=len(tasks),
+            )
+        )
+
+
+def getObservations():
+    global args
+    data = []
+    observations = []
+    XMMMaster = args["XMMMaster"]
+    allowedModes = list(map(lambda x: x.strip(), args["allowedModes"].split(",")))
+
+    if "observations" not in args:
+        raise FileNotFoundError('No "observations" file is provided.')
+
+    with open(urlretrieve(XMMMaster)[0], "r") as file:
+        lines = file.readlines()
+        for row in lines[3:]:
+            if row.strip() == "":
+                continue
+            data.append(list(map(lambda x: x.strip(), row.split("|"))))
+        table = pd.DataFrame(
+            data, columns=list(map(lambda x: x.strip(), lines[1].split("|")))
+        )
+        N = len(table)
+        print(f"Number of entries: {N}.")
+        for i in range(N):
+            mode = None
+            for mask in allowedModes:
+                if (table["mode_filter"][i] is not None) and (
+                    table["mode_filter"][i].find(mask) != -1
+                ):
+                    mode = mask
+            if mode is not None:
+                observations.append(table["obsno"][i] + " " + mode)
+    observations.sort()
+    with open(args["observations"], "w") as file:
+        print(*observations, sep="\n", file=file)
+    print("Observation parsing is finished.")
+
+
+def getObservationIDs():
+    global args
+    if "observations" not in args:
+        raise FileNotFoundError('No "observations" file is provided.')
+    
+    obsIDs = None
+    with open(args["observations"], "r") as file:
+        obsIDs = list(map(lambda x: x.split()[0].strip(), file.readlines()))
+
+    if "transients" in args:
+        result = []
+        exclude = set()
+        lines = []
+        if os.path.isfile(args["transients"]):
+            with open(args["transients"], "r") as file:
+                for line in file.readlines():
+                    if line[0] == "#":
+                        exclude.add(line.split()[0].strip()[1:])
+                        lines.append(line.strip())
+                    elif line[0] == "~" or line[0] == "!":
+                        result.append(line.split()[0].strip()[1:])
+                        exclude.add(result[-1])
+                    else:
+                        lines.append(line.strip())
+        for ID in obsIDs:
+            if ID not in exclude:
+                result.append(ID)
+        with open(args["transients"], "w") as file:
+            for line in lines:
+                print(line, file=file)
+        obsIDs = result
+
+    return obsIDs
+
 
 if __name__ == "__main__":
-    """ List of usable IDs
-    0000110101
-    0001730201
-    0001730601
-    0001930301
-    0002740301
-    0002740501
-    0004610401
-    0004210201
-    """
-
-    obsIDMain = "0303110101"  # Remember where you've started
     obsIDs = [
         "0303110101",
-        "0000110101",
         "0004210201",
         "0004610401",
+        "0002740501",
+        "0001730201",
+        "0000110101",
+        "0001730601",
+        "0001930301",
     ]
-    num = 100
-    obsNum = 0
-    coreNum = 4
 
     timeStamp = time()
+    conf = Calc.Config()
+    coreNumber = 1
 
-    for dur in [100]:
-        for prob in [0.01]:
-            processes = [multiprocessing.Process(target=emptyFunc)] * coreNum
-            processes[0].start() # Since all the array elements are references to the same null process.
-            processes[0].join()
-            sumtime = multiprocessing.Value('d', 0)
-            success = multiprocessing.Value('i', 0)
-            found = multiprocessing.Value('i', 0)
-            for i in range(num):
-                # Waiting for any process to finish
-                pnum = 0
-                while True:
-                    if processes[pnum].exitcode is not None:
-                        processes[pnum] = multiprocessing.Process(target=run, args=(i, dur, prob, obsIDs[obsNum], sumtime, success, found))
-                        processes[pnum].start()
-                        break
-                    pnum += 1
-                    pnum %= coreNum
-                    sleep(1)
-            for proc in processes:
-                proc.join()
-            print("")
-            print(f"Average time: {round(sumtime.value / num, 2)}s\n"
-                  + f"Success rate: {round(success.value / num * 100)}%\n"
-                  + f"Find rate: {round(found.value / num * 100)}%\n"
-                  + f"Observation parameters: {obsIDs[obsNum]}, {dur}, {prob}\n")
+    for arg in sys.argv[2:]:
+        name, val = arg.split("=", 1)
+        if name == "config":
+            with open(val, "r") as r:
+                for line in r.readlines():
+                    exec("conf." + line.strip())
+        elif name == "coreNumber":
+            coreNumber = int(val)
+        else:
+            args[name] = val
 
-    print(f"Machine time: {round(sumtime.value, 2)}s\n" +
-          f"Real time: {round(time() - timeStamp, 2)}s\n")
+    if len(sys.argv) < 2:
+        raise ValueError("No mode is provided.")
+    mode = sys.argv[1]
+
+    manager = Manager()
+    lock = manager.Lock()
+    panic = manager.Value("i", False)
+
+    if mode == "getObservations":
+        getObservations()
+    elif mode == "process":
+        obsIDs = getObservationIDs()
+        if "transients" not in args:
+            raise FileNotFoundError('No "transients" file is provided.')
+        processImages(obsIDs, coreNumber, conf, lock, args["transients"], panic)
+    elif mode == "image":
+        if "ID" not in args:
+            raise ValueError('No observation "ID" is provided.')
+        tf = Calc.TransientFinder(args["ID"], conf)
+        tf.process()
+        print(tf.result)
+        del tf
+        gc.collect()
+    elif mode == "test":
+        obsIDs = getObservationIDs()
+        if "result" not in args:
+            raise FileNotFoundError('No "result" file is provided.')
+        if "durations" not in args:
+            raise FileNotFoundError('No "durations" are provided')
+        if "probs" not in args:
+            raise FileNotFoundError('No "probs" are provided')
+        if "repeat" not in args:
+            raise FileNotFoundError('No "repeat" number is provided')
+        fakeImages(obsIDs, coreNumber, conf, lock, args["result"], panic,
+                   args["durations"], args["probs"], args["repeat"], )
+    else:
+        raise ValueError(f"Unknown mode: {mode}.")
+
+    print(f"Time: {round(time() - timeStamp)} s")
+    exit(0)

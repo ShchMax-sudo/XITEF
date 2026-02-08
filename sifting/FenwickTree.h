@@ -1,6 +1,6 @@
-#include <unordered_map>
-#include <cmath>
 #include "Parser.h"
+#include <cmath>
+#include <unordered_map>
 
 class FenwickTree {
 private:
@@ -33,7 +33,7 @@ public:
         return std::make_pair((int) round(event.getX()), (int) round(event.getY()));
     }
 
-    FenwickTree(Photon* photons, size_t n, int maxx, int maxy) : t_(std::unordered_map<long long, int>()), maxx_(maxx), maxy_(maxy) {
+    FenwickTree(std::vector<Photon> &photons, size_t n, int maxx, int maxy): t_(std::unordered_map<long long, int>()), maxx_(maxx), maxy_(maxy) {
         for (size_t i = 0; i < n; ++i) {
             std::pair<int, int> xy = this->eventToXY(photons[i]);
             this->add(xy.first, xy.second, 1);

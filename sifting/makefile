@@ -46,4 +46,4 @@ Sifting: $(SIFTING)
 	$(CC) $(SIFTING) -o $(SIFTING_BUILD)
 
 py:
-	py setup.py build_ext -i
+	python setup.py build_ext -i

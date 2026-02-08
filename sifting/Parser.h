@@ -1,16 +1,17 @@
 #ifndef MY_PARSER_H
 #define MY_PARSER_H
 
-#include <iostream>
-#include <vector>
 #include <cmath>
 #include <iomanip>
+#include <iostream>
+#include <vector>
 
 class Photon {
 private:
     double x_;
     double y_;
     double time_;
+
 public:
     double getX() {
         return this->x_;
@@ -39,9 +40,9 @@ std::ostream& operator<<(std::ostream& stream, Photon& v) {
     return stream;
 }
 
-std::pair<Photon*, size_t> getPhotons(std::vector<double> &x, std::vector<double> &y, std::vector<double> &time) {
+std::pair<std::vector<Photon>, size_t> getPhotons(std::vector<double> &x, std::vector<double> &y, std::vector<double> &time) {
     size_t n = x.size();
-    Photon* photons = new Photon[n]();
+    std::vector<Photon> photons(n);
     for (size_t i = 0; i < n; ++i) {
         photons[i] = Photon(x[i], y[i], time[i]);
     }

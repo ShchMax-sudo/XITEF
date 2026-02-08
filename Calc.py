@@ -1,54 +1,57 @@
-import astropy.io.fits as fits
-import matplotlib.pyplot as plt
-import numpy as np
-from astroquery.esa.xmm_newton import XMMNewton
 import os
 import tarfile
 import shutil
-from math import floor, cos, sin, pi, ceil, gamma, log, sqrt, radians, exp
+from math import floor, cos, sin, pi, ceil, log, sqrt, radians, exp
 from time import time
-from FenwickTree import FenwickTree
-from scipy.stats import poisson
 from random import choice, random
 import sys
+from scipy.stats import poisson
+from astropy.io import fits
+import matplotlib.pyplot as plt
+import numpy as np
+from astroquery.esa.xmm_newton import XMMNewton
+from FenwickTree import FenwickTree
 
 sys.path.append("sifting")
 
 import sifting
 
+
 class Config:
     def __init__(self):
-        self.firstLayerCheckTimeInterval = 10  # Time interval in which photons count for the first layer check.
-        self.goodPhotonsCountThreshold = 4  # The amount photons needed to be in 10 seconds interval to count the current one as a “probably good”
-        self.probabilityThreshold = 10  # pGlob of a Poisson probability threshold for a photon to count as “good”
-        self.transientCountThreshold = 7  # Minimum photons amount in a transient candidate
-        self.flagFilter = 12  # An upper threshold for the quality flag
+        self.firstLayerCheckTimeInterval = 10                                                                           # Time interval in which photons count for the first layer check
+        self.goodPhotonsCountThreshold = 4                                                                              # The amount of photons needed to be in 10 seconds interval to count the current one as a “probably good”
+        self.probabilityThreshold = 10                                                                                  # pGlob of a Poisson probability threshold for a photon to count as “good”
+        self.transientCountThreshold = 7                                                                                # Minimum amount of photons in a transient candidate
+        self.flagFilter = 12                                                                                            # An upper threshold for the quality flag
 
-        self.pglobCoefficient = 1  # Recalculation coefficient from local to global probabilities (pglob = survivalFunction * pglobCoefficient / timeInterval)
+        self.pglobCoefficient = 1                                                                                       # Recalculation coefficient from local to global probabilities (pglob = survivalFunction * pglobCoefficient / timeInterval)
 
-        self.transientDuration = 10  # Expecting transient duration
-        self.timeThreshold = 10  # Time interval using for transient composition (needed to be same order as expecting transient duration)
+        self.transientDuration = 10                                                                                     # Expectied transient duration
+        self.timeThreshold = 10                                                                                         # Time interval used for transient composition (needed to be same order as expected transient duration)
 
-        self.innerRingScale = 3  # How many times background inner ring radius is larger than transient circle radius
-        self.outerRingScale = 5  # How many times background outer ring radius is larger than transient circle radius
-        self.timeScale = 1  # How many times background checking duration is larger than transient duration.
+        self.innerRingScale = 3                                                                                         # How many times background inner ring radius is larger than transient circle radius
+        self.outerRingScale = 5                                                                                         # How many times background outer ring radius is larger than transient circle radius
+        self.timeScale = 1                                                                                              # How many times background checking duration is larger than transient duration
 
         self.transientBackgroundUncertainty = 10  # 1 / uncertainty of a background during pglob calculations
-        self.pglobThresh = 0.05  # Max global probability of transient to be saved
+        self.pglobThresh = 0.05                                                                                         # Max global probability of transient for it to be saved
 
         # BTI calculation
-        self.hed = (10, 12)  # High-energy diapason
-        self.BTIthreshold = 0.4  # Counts per second
-        self.binDur = 100  # Duration of one bin
+        self.hed = (10, 12)                                                                                             # High-energy diapason
+        self.BTIthreshold = 0.4                                                                                         # Counts per second
+        self.binDur = 100                                                                                               # Duration of one bin
 
-        self.addFakeTransient = False  # If add fake transient
-        self.ftransientTime = 10  # Duration of a fake transient
-        self.ftransientProb = 0.05 # Global probability of a fake transient
-        self.showDebug = False  # If show debug plots and prints
-        self.printDebug = False  # If print program run information in file
-        self.showVision = False  # If run Vision after image processing
-        self.showTransients = False  # If show plots for each transient
-        self.removeStars = True # If remove stars at the first stage of processing
+        self.addFakeTransient = False                                                                                   # If it is needed to add fake transient
+        self.ftransientTime = 10                                                                                        # Duration of a fake transient
+        self.ftransientProb = 0.05                                                                                      # Global probability of a fake transient
+        self.showDebug = False                                                                                          # If it is needed to show debug plots and prints
+        self.printDebug = False                                                                                         # If it is needed to print program run information in file
+        self.showVision = False                                                                                         # If it is needed to run Vision after image processing
+        self.showTransients = False                                                                                     # If it is needed to show plots for each transient
+        self.removeStars = True                                                                                         # If it is needed to remove stars at the first stage of processing
+        self.removeBTI = False                                                                                          # If it is needed to remove photons within BTIs.
+
 
 class TransientFinder:
     # There are 3 coordinate systems: RA-DEC (FK5), Local and Picture
@@ -67,7 +70,8 @@ class TransientFinder:
     # 4. Removal of stars – all photons near to the detected “stars” in OBSMLI (in PSF area) are being removed
     #    This not for time optimisation purpose, but for removing potential photons with inhomogeneous background
     # 5. Bad events removal – all photons with non-zero quality flag or with out-of-picture coordinates are being removed
-    # 6. Adding fake transient (if addFakeTransient is True)
+    # 6. Calculation of the mean background during BTI and GTI
+    # 7. Adding fake transient (if addFakeTransient is True)
     # 8. Calculating the number of photons within the 10-second interval (for each photon)
     # 9. Calculating the number of photons during the entire observation (for each photon)
     # 10. pGlob calculation for each photon
@@ -80,7 +84,7 @@ class TransientFinder:
     # When determining time characteristic of transients (or other similar thing) “mean” means mean and “d” means dispersion, not duration (half-transient duration)
 
     distanceCheckGeneral = (lambda e1, e2, psf: abs(e1[0] - e2[0]) <= psf and
-                                                abs(e1[1] - e2[1]) <= psf)  # Function for taxicab distance checking
+                                                abs(e1[1] - e2[1]) <= psf)                                              # Function for taxicab distance checking
 
     # Class for calculations related to CCD or CCD coordinates
     class CCD:
@@ -95,8 +99,10 @@ class TransientFinder:
             self.GTIevents = []
             self.BTIevents = []
 
-        # Calculates the necessary coefficients for CCD coordinates transform
+        # Calculates necessary coefficients for CCD coordinates transform
         def initCoords(self):
+            if len(self.GTIevents) == 0 and len(self.BTIevents) == 0:
+                return
             if len(self.GTIevents) < 3:
                 raise Exception("Not enough events in CCD #" + str(self.num))
             event0, event1, event2 = self.GTIevents[:3]
@@ -119,7 +125,7 @@ class TransientFinder:
                     round(self.xyToCCDcoeff[3] * x + self.xyToCCDcoeff[4] * y
                           + self.xyToCCDcoeff[5]))
 
-        # Initialisation of GTI arrays
+        # Initialises GTI arrays
         def initGTI(self, gtis, observationStart, observationEnd):
             self.GTI = self.GTI = [(observationStart - 1, 1)]
             for gti in gtis:
@@ -140,12 +146,12 @@ class TransientFinder:
                     R = m
             return L
 
-        # Checks if event in GTI
+        # Checks if event is in GTI
         def inGTI(self, event):
             _, _, t = event[:3]
             return not self.GTI[self.lowerBound(t, self.GTI, 0)][1]
 
-        # Obsolete
+        # Obsolete and incorrect method
         def GTIpart(self, tm, td):
             ts = tm - td
             te = tm + td
@@ -153,11 +159,13 @@ class TransientFinder:
             gti = 0
             bti = 0
             while ts < te:
-                end = min(te, self.GTI[i + 1][0])
+                end = te
+                if i + 1 < len(self.GTI):
+                    end = min(te, self.GTI[i + 1][0])
                 if self.GTI[i][1]:
-                    bti += (end - ts)
+                    bti += end - ts
                 else:
-                    gti += (end - ts)
+                    gti += end - ts
                 i += 1
                 ts = end
             return gti, bti
@@ -196,7 +204,7 @@ class TransientFinder:
                                         dtype=float)
             self.nums = np.zeros(ccdnum, dtype=int)
 
-        # Append an event to background precalculation
+        # Appends an event to background precalculation
         def add(self, event):
             i = self.eventToCCDnum(event)
             self.nums[i] += 1
@@ -220,15 +228,14 @@ class TransientFinder:
             num = 0
             bck = np.asarray(backgrounds)
             xp, yp = self.localToPic([x, y])
-            l = ceil(radius * self.localToPicScale)
-            for i in range(xp - l, xp + l + 1):
-                for j in range(yp - l, yp + l + 1):
+            k = ceil(radius * self.localToPicScale)
+            for i in range(xp - k, xp + k + 1):
+                for j in range(yp - k, yp + k + 1):
                     f = False
                     for dx in [0, 1]:
                         for dy in [0, 1]:
                             xl, yl = self.picToLocal([i + dx, j + dy])
-                            f |= (((x - xl) ** 2 + (y - yl) ** 2) ** 0.5
-                                  <= radius)
+                            f |= ((x - xl) ** 2 + (y - yl) ** 2) ** 0.5 <= radius
                     if f:
                         num += 1
                         sum_ += np.dot(bck, self.backgrounds[i][j])
@@ -237,32 +244,32 @@ class TransientFinder:
     # Convert local telescope coordinates to picture coordinates
     def __init__(self, obsId, config, bincount=512):
         self.obsID = obsId
-        self.bincount = bincount  # Number of bins per an axis in output picture
-        self.localToPicScale = None  # Local to picture coordinate transform scale
-        self.meanFieldBackground = None  # Mean background during the whole observation
-        self.xmin, self.xmax, self.ymin, self.ymax = None, None, None, None  # Min and max possible values of local coordinates
-        self.refx, self.refy = None, None  # Local coordinates of LOS
-        self.xdel, self.ydel = None, None  # Angular measure of one local pixel (coordinates per degree)
-        self.raref, self.decref = None, None  # FK5 coordinates of LOS (degrees)
-        self.picPsf = None  # Point Spread Function radius in units of picture pixels
-        self.localPsf = None  # Point Spread Function Radius in units of local pixels
-        self.observationPeriod = None  # Period between earliest and latest photons detected
-        self.fullImageArea = None  # Area of image in local coordinate pixels (12 of one pn chip area)
-        self.psfArea = None  # Area of psf in local coordinate pixels
-        self.distanceCheck = None
-        self.pglobCoefficient = 1
-        self.fakex = None
-        self.fakey = None
-        self.faketmin = None
-        self.faketmax = None
-        self.CCDs = None
-        self.GTIbkg = None
-        self.BTIbkg = None
-        self.result = None
-        self.timeStamp = None
-        self.globalTimeStamp = None
-        self.config = config
-        self.workDir = os.getcwd()
+        self.bincount = bincount                                                                                        # Number of bins per axis in output picture
+        self.localToPicScale = None                                                                                     # Local to picture coordinate transform scale
+        self.meanFieldBackground = None                                                                                 # Mean background during the whole observation
+        self.xmin, self.xmax, self.ymin, self.ymax = None, None, None, None                                             # Min and max possible values of local coordinates
+        self.refx, self.refy = None, None                                                                               # Local coordinates of LOS
+        self.xdel, self.ydel = None, None                                                                               # Angular measure of one local pixel (coordinates per degree)
+        self.raref, self.decref = None, None                                                                            # FK5 coordinates of LOS (degrees)
+        self.picPsf = None                                                                                              # Point Spread Function radius in units of picture pixels
+        self.localPsf = None                                                                                            # Point Spread Function Radius in units of local pixels
+        self.observationPeriod = None                                                                                   # Period between the earliest and the latest photons detected
+        self.fullImageArea = None                                                                                       # Area of image in local coordinate pixels (12 of one pn chip area)
+        self.psfArea = None                                                                                             # Area of psf in local coordinate pixels
+        self.distanceCheck = None                                                                                       # Function that checks if two points are close to each other
+        self.pglobCoefficient = 1                                                                                       # Coefficient used to convert local probabilities to global
+        self.fakex = None                                                                                               # X coordinate of the fake transient
+        self.fakey = None                                                                                               # Y coordinate of the fake transient
+        self.faketmin = None                                                                                            # Start time of the fake transient
+        self.faketmax = None                                                                                            # End time of the fake transient
+        self.CCDs = None                                                                                                # List of CCDs
+        self.GTIbkg = None                                                                                              # Good Time Interval background map
+        self.BTIbkg = None                                                                                              # Bad Time Interval background map
+        self.result = None                                                                                              # Result of the program
+        self.timeStamp = None                                                                                           # Time stamp used to measure local work time
+        self.globalTimeStamp = None                                                                                     # Time stamp used to measure whole program work time
+        self.config = config                                                                                            # Configure parameters
+        self.workDir = os.getcwd()                                                                                      # Path to the working directory
 
     # Converts local telescope coordinates to local coordinates
     def localToPic(self, xyte):
@@ -285,7 +292,7 @@ class TransientFinder:
             pixels[x, y] += 1
         for i in range(self.bincount):
             for j in range(self.bincount):
-                pixels[i, j] = (pixels[i, j] ** (1 - gamma))
+                pixels[i, j] = pixels[i, j] ** (1 - gamma)
         plt.imshow(pixels, cmap="Greys")
         pixels = np.zeros((self.bincount, self.bincount), dtype=float)
         self.picPsf *= 3
@@ -302,7 +309,7 @@ class TransientFinder:
         plt.title(title)
         plt.show()
 
-    # Downloads the necessary files
+    # Downloads necessary files
     def getDetections(self, observationID):
         if not os.path.exists(self.workDir + "/data/" + observationID):
             os.mkdir(self.workDir + "/data/" + observationID)
@@ -338,9 +345,9 @@ class TransientFinder:
         plt.imshow(pixels, cmap="Greys")
         plt.show()
 
-    # Initializes the necessary parameters for coordinates conversions
+    # Initializes necessary parameters for coordinates conversions
     def initWCS(self, header):
-        self.xmin, self.xmax = header["REFXLMIN"],header["REFXLMAX"]
+        self.xmin, self.xmax = header["REFXLMIN"], header["REFXLMAX"]
         self.ymin, self.ymax = header["REFYLMIN"], header["REFYLMAX"]
         self.refx, self.refy = header["REFXCRPX"], header["REFYCRPX"]
         self.xdel, self.ydel = header["REFXCDLT"], header["REFYCDLT"]
@@ -348,14 +355,14 @@ class TransientFinder:
         xm = self.xmax - self.xmin + 1
         ym = self.ymax - self.ymin + 1
         self.localToPicScale = self.bincount / max(xm, ym)
-        self.localPsf = ceil(abs(15 / 3600 / self.xdel))  # 15 minutes psf
+        self.localPsf = ceil(abs(15 / 3600 / self.xdel))                                                                # 15 seconds psf
         self.picPsf = ceil(abs(self.localPsf * self.localToPicScale))
         self.fullImageArea = 200 * 64 * (4.1 / 3600) ** 2 * 12 / abs(
-            self.xdel * self.ydel)  # Every of 12 pn chips has 200×64 size, and every chip pixel covers 4.1 arcsec of scy
+            self.xdel * self.ydel)                                                                                      # Every of 12 pn chips has 200×64 size, and every chip pixel covers 4.1 arcsec of scy
         self.psfArea = self.localPsf ** 2 * pi
         self.distanceCheck = (
             lambda e1, e2: TransientFinder.distanceCheckGeneral(e1, e2,
-                                                                self.localPsf))  # Checks if events are in one PSF (taxicab type)
+                                                                self.localPsf))                                         # Checks if events are in one PSF (taxicab type)
 
     # Converts the local telescope XY coordinates to FK5 RA DEC coordinates
     def localToFK5(self, x, y):
@@ -394,7 +401,7 @@ class TransientFinder:
         cntBackground = self.calcBackground(self.fakex, self.fakey,
                                             faketmean, faketd)
 
-        L = self.config.transientCountThreshold - cntGood - 1  # To ensure that there are at least transientCountThreshold photons
+        L = self.config.transientCountThreshold - cntGood - 1                                                           # To ensure that there are at least transientCountThreshold photons
         R = len(photons)
         while R - L > 1:
             m = (L + R) // 2
@@ -415,9 +422,8 @@ class TransientFinder:
         for i in range(R):
             photon = originPhoton.copy()
             photon[2] = times[i]
-            r, phi = size / 3 * sqrt(-2.0 * log(
-                random())), random()  # Box-Miller transform; dispersion of normal distribution is third of PSF size
-            r %= size  # To be sure, added photons aren't out of psf
+            r, phi = (size / 3 * sqrt(-2.0 * log(random())), random())                                                  # Box-Miller transform; dispersion of normal distribution is third of PSF size
+            r %= size                                                                                                   # To be sure that added photons are not out of psf
             x, y = (r * cos(2 * pi * phi) + self.fakex,
                     r * sin(2 * pi * phi) + self.fakey)
             photon[0], photon[1] = x, y
@@ -426,7 +432,6 @@ class TransientFinder:
 
         result = np.append(photons, np.asarray(additionalPhotons), axis=0)
         return self.timeSort(result)
-
 
     # Checks if transient with given parameters are similar to added fake transient
     def checkFakeTransient(self, x, y, tmean, tdev):
@@ -437,7 +442,6 @@ class TransientFinder:
     @staticmethod
     def timeSort(arr):
         return arr[np.argsort(arr[:, 2])]
-
 
     # Gets all photons from given observation
     def getEvents(self, observationID):
@@ -452,8 +456,7 @@ class TransientFinder:
         timemin = np.min(times)
         timemax = np.max(times)
         self.observationPeriod = timemax - timemin
-
-        self.pglobCoefficient *= self.fullImageArea / self.psfArea * self.observationPeriod  # Look-elsewhere effect Pglob coefficient
+        self.pglobCoefficient *= self.fullImageArea / self.psfArea * self.observationPeriod                             # Look-elsewhere effect Pglob coefficient
 
         photons = self.timeSort(photons)
         return photons
@@ -466,7 +469,7 @@ class TransientFinder:
         stars = np.asarray([np.asarray(list(self.FK5ToLocal(i[0], i[1])) + [0, 0]) for i in stars])
         mask = set()
         for star in stars:
-            x, y = self.localToPic(star)  # Picture coordinates are used to optimise star masking
+            x, y = self.localToPic(star)                                                                                # Picture coordinates are used to optimise star masking
             for i in range(-self.picPsf, self.picPsf):
                 for j in range(-self.picPsf, self.picPsf):
                     if i ** 2 + j ** 2 <= self.picPsf ** 2:
@@ -487,7 +490,7 @@ class TransientFinder:
 
     # Slow method to count all photons near to given within time diapason
     def countValidEvents(self, photons, e, selectionTime=float("inf")):
-        selectionTime /= 2.
+        selectionTime /= 2.0
         count = 0
         for event in photons:
             if abs(event[2] - e[2]) <= selectionTime:
@@ -500,7 +503,7 @@ class TransientFinder:
     def calcPhotons(self, photons, selectionTime=None, chosenIndexes=None):
         f = selectionTime is None
         if not f:
-            selectionTime /= 2.
+            selectionTime /= 2.0
         if f:
             ft = FenwickTree(photons, self.xmax, self.ymax)
         else:
@@ -509,12 +512,12 @@ class TransientFinder:
         left = 0
         right = 0
         maxResult = 0
-        for i in range(len(photons)):
+        for i, photon in enumerate(photons):
             if chosenIndexes is not None and not chosenIndexes[i]:
                 continue
             if not f:
-                current_time = photons[i][2]
-                while current_time - photons[left][2] > selectionTime:
+                current_time = photon[2]
+                while current_time - photon[2] > selectionTime:
                     x, y = ft.event_to_xy(photons[left])
                     ft.add(x, y, -1)
                     left += 1
@@ -523,7 +526,7 @@ class TransientFinder:
                     x, y = ft.event_to_xy(photons[right])
                     ft.add(x, y, 1)
                     right += 1
-            x, y = ft.event_to_xy(photons[i])
+            x, y = ft.event_to_xy(photon)
             result[i] = ft.count(x - self.localPsf, x + self.localPsf,
                                  y - self.localPsf, y + self.localPsf)
             maxResult = max(maxResult, float(result[i]))
@@ -579,11 +582,11 @@ class TransientFinder:
     # Removes unnecessary events such as out of bounds or bad flag events
     def removeBadEvents(self, photons):
         candidates = np.zeros(len(photons), dtype=bool)
-        for i in range(len(photons)):
-            if (photons[i][0] > self.xmax or photons[i][1]
-                    > self.ymax or photons[i][0] < 0 or photons[i][1] < 0):
+        for i, photon in enumerate(photons):
+            if (photon[0] > self.xmax or photon[1] > self.ymax or photon[0] < 0
+                    or photon[1] < 0):
                 candidates[i] = False
-            elif photons[i][4] > self.config.flagFilter:
+            elif photon[4] > self.config.flagFilter:
                 candidates[i] = False
             else:
                 candidates[i] = True
@@ -610,11 +613,17 @@ class TransientFinder:
             file.close()
 
     # Uniform global probability calculation function
-    def pGlob(self, eventCnt: float, backgroundCnt: float,
-              eventDuration: float, backgroundDuration: float):
-        return exp(poisson.logsf(round(eventCnt), backgroundCnt
-                                 / backgroundDuration * eventDuration)
-                   + log(self.pglobCoefficient / eventDuration))
+    def pGlob(self, eventCnt, backgroundCnt, eventDuration, backgroundDuration):
+        if type(eventCnt) is not list:
+            eventCnt = [eventCnt]
+            backgroundCnt = [backgroundCnt]
+            eventDuration = [eventDuration]
+            backgroundDuration = [backgroundDuration]
+        prob = log(self.pglobCoefficient / sum(eventDuration))
+        for i, cnt in enumerate(eventCnt):
+            prob += poisson.logsf(round(cnt) - 1, backgroundCnt[i]
+                                  / backgroundDuration[i] * eventDuration[i])
+        return exp(prob)
 
     # Gets number of given event CCD
     @staticmethod
@@ -622,15 +631,18 @@ class TransientFinder:
         return int(event[5]) - 1
 
     # Calculates background with the fanciest method I've ever programmed
-    def calcBackground(self, x, y, tm, td):
+    def calcBackground(self, x, y, tm, td, both=False):
         gtis = []
         btis = []
         for i in range(12):
             gti, bti = self.CCDs[i].getGTIBTI(tm - td, tm + td)
             gtis.append(gti)
             btis.append(bti)
-        return (self.GTIbkg.calc(x, y, self.localPsf, gtis)
-                + self.BTIbkg.calc(x, y, self.localPsf, btis))
+        gti = self.GTIbkg.calc(x, y, self.localPsf, gtis)
+        bti = self.BTIbkg.calc(x, y, self.localPsf, btis)
+        if both:
+            return gti, bti
+        return gti + bti
 
     # Calculates Good Time Intervals
     def GTIcalc(self, events):
@@ -665,32 +677,34 @@ class TransientFinder:
             plt.show()
         return gtis
 
+    # Initialises program result variable
     def initResults(self, obsID):
-        self.result = {
-            "type": "Unknown",
-            "observationID": obsID,
-            "transients": []
-        }
+        self.result = {"type": "Unknown", "observationID": obsID, "transients": []}
 
-    def addTransientToResult(self, x, y, tmean, tdev, cnt, background, prob):
+    # Adds transient to program result variable
+    def addTransientToResult(self, x, y, tmean, tdev, cntgti, backgroundgti,
+                             cntbti, backgroundbti, prob):
         self.result["transients"].append({
             "x": float(x),
             "y": float(y),
             "tmean": float(tmean),
             "tdev": float(tdev),
-            "cnt": int(cnt),
-            "background": float(background),
+            "cntGTI": int(cntgti),
+            "backgroundGTI": float(backgroundgti),
+            "cntBTI": int(cntbti),
+            "backgroundBTI": float(backgroundbti),
             "prob": float(prob),
         })
 
-    # More human readable str() function of integers
+    # More human readable str() function for integers
     def sstr(self, i: int, arr=None):
         if arr is None:
             arr = []
         if i == 0:
             if not arr:
                 return "0"
-            return "`".join([str(arr[0])] + [str(i // 100) + str(i % 100 // 10) + str(i % 10) for i in arr[1:]])
+            return "`".join([str(arr[0])] + [str(i // 100) + str(i % 100 // 10)
+                                             + str(i % 10) for i in arr[1:]])
         return self.sstr(i // 1000, [i % 1000] + arr)
 
     # Main transient finding function
@@ -699,33 +713,34 @@ class TransientFinder:
         self.globalTimeStamp = time()
         self.initResults(self.obsID)
 
-        # Getting events from certain observation
+        # Gets events from certain observation
         self.CCDs = [self.CCD(i) for i in range(12)]
         try:
             self.getDetections(self.obsID)
-        except:
+        except Exception:
             self.result["type"] = "NetworkError"
             return
         events = None
         try:
             events = self.getEvents(self.obsID)
-        except:
+        except Exception:
             self.result["type"] = "PIEVLIError"
             return
         if self.config.showDebug:
             self.showEvents(events, "Image before processing")
 
-        # Star events removing
+        # Removes star events
         size1 = len(events)
         try:
             if self.config.removeStars:
                 events = self.removeStars(events, self.obsID, show=False)
-        except:
+        except Exception:
             self.result["type"] = "OBSMLIError"
             return
         size2 = len(events)
         if self.config.showDebug:
-            print("Number of events with/without stars:", self.sstr(size1), self.sstr(size2))
+            print("Number of events with/without stars:", self.sstr(size1),
+                  self.sstr(size2))
         self.result["EventsWithStars"] = size1
         self.result["EventsWithoutStars"] = size2
         events = self.removeBadEvents(events)
@@ -746,12 +761,21 @@ class TransientFinder:
             for ccd in self.CCDs:
                 ccd.initGTI(gtis, tmin, tmax)
 
-        for event in events:
+        gtievents = np.zeros(len(events), dtype=bool)
+
+        for i, event in enumerate(events):
             self.CCDs[self.eventToCCDnum(event)].addEvent(event)
             if self.CCDs[self.eventToCCDnum(event)].inGTI(event):
                 self.GTIbkg.add(event)
+                gtievents[i] = True
             else:
                 self.BTIbkg.add(event)
+                gtievents[i] = False
+
+        if self.config.removeBTI:
+            events = events[gtievents]
+            gtievents = gtievents[gtievents]
+            self.result["EventsWithoutBTI"] = len(events)
 
         for ccd in self.CCDs:
             ccd.initCoords()
@@ -761,13 +785,26 @@ class TransientFinder:
 
         if self.config.addFakeTransient:
             events = self.addFakeTransient(events, self.config.ftransientProb,
-                                           self.config.ftransientTime, self.CCDs,
-                                           self.localPsf)
+                                           self.config.ftransientTime,
+                                           self.CCDs, self.localPsf)
+
+            gtievents = np.zeros(len(events), dtype=bool)
+
+            for i, event in enumerate(events):
+                if self.CCDs[self.eventToCCDnum(event)].inGTI(event):
+                    gtievents[i] = True
+                else:
+                    gtievents[i] = False
+
+            if self.config.removeBTI:
+                events = events[gtievents]
+                gtievents = gtievents[gtievents]
+                self.result["EventsWithoutBTI"] = len(events)
 
         meanFieldBackground = events.size / self.observationPeriod / self.fullImageArea
 
-        # Removing of non-transient events and getting number of “near” events within 10-seconds interval
-        indexes = np.ones(len(events), dtype=bool)  # There was an optimisation; since it was bad it got removed
+        # Removes non-transient events and gets number of “near” events within 10-seconds interval
+        indexes = np.ones(len(events), dtype=bool)                                                                      # There was an optimisation; it was bad, so it got removed
 
         tenSeconds = sifting.calc(*events[:, :3].transpose(), self.xmax,
                                   self.ymax, self.localPsf, indexes,
@@ -784,19 +821,16 @@ class TransientFinder:
 
         self.result["ImprobableEvents"] = len(events[chosenIndexes])
 
-        averageBackground = sifting.calc(*events[:, :3].transpose(),
-                                         self.xmax, self.ymax, self.localPsf,
-                                         chosenIndexes, 0)
+        averageBackground = sifting.calc(*events[:, :3].transpose(), self.xmax,
+                                         self.ymax, self.localPsf, chosenIndexes, 0)
 
         self.result["EventsSiftingTime"] = time() - self.timeStamp
         self.timeStamp = time()
 
         if self.config.showDebug:
-            print("Processing time: ", round(self.result["EventsSiftingTime"]),
-                  "s", sep="")
+            print("Processing time: ", round(self.result["EventsSiftingTime"]), "s", sep="")
 
-
-        # Calculating the probability of every event to be from a background
+        # Calculates the probability of every event to be from a background
         probabilityCoefficients = np.zeros((len(events)), dtype=float)
 
         for i in range(len(events)):
@@ -807,13 +841,13 @@ class TransientFinder:
                                                     self.config.transientDuration,
                                                     self.observationPeriod)
 
-        # Distribution events into transients
+        # Distributes events into transients
         potentialIndexes = []
         for i in range(len(events)):
             if probabilityCoefficients[i] <= self.config.probabilityThreshold:
                 potentialIndexes.append(i)
 
-        # Checking for number of potential events in fake transient
+        # Checks for number of potential events in fake transient
         if self.config.addFakeTransient:
             fakecnt = 0
             for event in events[potentialIndexes]:
@@ -823,17 +857,17 @@ class TransientFinder:
                     fakecnt -= -1
 
             if self.config.showDebug:
-                print("{} photons of fake transient found".format(fakecnt))
+                print(f"{fakecnt} photons of fake transient found")
 
             self.result["FakeCount"] = fakecnt
 
-        # Continuation of distribution
+        # Continues to distribute
         cluster = sifting.clustering(*events[potentialIndexes, :3].transpose(),
                                      -np.log10(probabilityCoefficients[potentialIndexes]),
                                      self.localPsf * 3, self.config.timeThreshold)
         pretransients = [[] for _ in range(np.max(cluster) + 1)]
-        for i in range(len(cluster)):
-            pretransients[cluster[i]].append(events[potentialIndexes[i]])
+        for i, clust in enumerate(cluster):
+            pretransients[clust].append(events[potentialIndexes[i]])
 
         self.result["Pretransients"] = len(pretransients)
 
@@ -849,9 +883,9 @@ class TransientFinder:
         if self.config.showDebug:
             print("Number of transients:", len(transients))
             print("Transient computation time: ",
-                  round(self.result["TransientComputationTime"]), "s", sep="")
+                  round(self.result["TransientComputationTime"]), "s", sep="", )
 
-        # Calculating global probabilities of transients
+        # Calculates global probabilities of transients
         def transCalc(innerSigmaCoefficient=1, outerSigmaCoefficient=3, bcgUncertainty=100):
             if len(transients) == 0:
                 if self.config.showDebug:
@@ -860,7 +894,7 @@ class TransientFinder:
 
             timeStamp = time()
 
-            transients.sort(key=(lambda x: -len(x)))
+            transients.sort(key=lambda x: -len(x))
 
             probs = []
             goodTransients = []
@@ -870,8 +904,7 @@ class TransientFinder:
             yms = []
             timems = []
             timeds = []
-            for j in range(len(transients)):
-                photons = transients[j]
+            for j, photons in enumerate(transients):
                 xm, ym = 0, 0
                 for photon in photons:
                     xm += photon[0]
@@ -893,24 +926,26 @@ class TransientFinder:
                     meanFieldBackground * self.psfArea *
                     (outerSigmaCoefficient ** 2 - innerSigmaCoefficient ** 2))
                                / (min(timeds) * 2))
-            counts = sifting.count(xms, yms, timems, timeds,
+            counts = sifting.count(xms, yms, timems, timeds, gtievents,
                                    *events[:, :3].transpose(), self.localPsf,
                                    innerSigmaCoefficient, outerSigmaCoefficient,
                                    timeCoefficient)
-            timeCoefficient = self.config.timeScale
             flags = []
 
             if self.config.addFakeTransient:
                 self.result["FakeTransientStatus"] = "NotFound"
 
             for j in range(len(transients)):
-                cntTransients, cntObs = counts[j], counts[j + len(transients)]
+                cntTransientsGTI, cntTransientsBTI = (counts[j], counts[j + len(transients)])
 
-                cntObs = self.calcBackground(xms[j], yms[j], timems[j], timeds[j])
+                cntObsGTI, cntObsBTI = self.calcBackground(xms[j], yms[j],
+                                                           timems[j], timeds[j],
+                                                           both=True)
 
                 try:
-                    pglob = self.pGlob(cntTransients, cntObs, timeds[j] * 2,
-                                       timeds[j] * 2 * timeCoefficient)
+                    pglob = self.pGlob([cntTransientsGTI, cntTransientsBTI],
+                                       [cntObsGTI, cntObsBTI], [timeds[j], timeds[j]],
+                                       [timeds[j], timeds[j]])
                 except ValueError:
                     pglob = inf
                 probs.append(pglob)
@@ -918,13 +953,13 @@ class TransientFinder:
                 isFake = False
 
                 if pglob <= self.config.pglobThresh:
-                    if (self.config.addFakeTransient
-                        and self.checkFakeTransient(xms[j], yms[j], timems[j], timeds[j])):
+                    if self.config.addFakeTransient and self.checkFakeTransient(xms[j], yms[j], timems[j], timeds[j]):
                         if self.config.showDebug:
                             print("-" * 10)
                             print("Found fake transient:", round(xms[j], 1),
                                   round(yms[j], 1), round(timems[j], 1),
-                                  round(timeds[j], 2), pglob, cntTransients, cntObs)
+                                  round(timeds[j], 2), pglob, cntTransientsGTI,
+                                  cntObsGTI, cntTransientsBTI, cntObsBTI)
 
                             print(round(self.fakex, 1), round(self.fakey, 1),
                                   round((self.faketmax + self.faketmin) / 2, 1),
@@ -937,8 +972,9 @@ class TransientFinder:
                         goodTransients.append((xms[j], yms[j], timems[j],
                                                timeds[j], pglob))
                         self.addTransientToResult(xms[j], yms[j], timems[j],
-                                                  timeds[j], cntTransients,
-                                                  cntObs, pglob)
+                                                  timeds[j], cntTransientsGTI,
+                                                  cntObsGTI, cntTransientsBTI,
+                                                  cntObsBTI, pglob)
                         flags.append(True)
                 else:
                     flags.append(False)
@@ -948,7 +984,8 @@ class TransientFinder:
                             print("-" * 10)
                             print("Not Found:", round(xms[j], 1), round(yms[j], 1),
                                   round(timems[j], 1), round(timeds[j], 2), pglob,
-                                  cntTransients, cntObs)
+                                  cntTransientsGTI, cntObsGTI, cntTransientsBTI,
+                                  cntObsBTI)
 
                             print(round(self.fakex, 1), round(self.fakey, 1),
                                   round((self.faketmax + self.faketmin) / 2, 1),
@@ -971,30 +1008,28 @@ class TransientFinder:
                         "tdevset": (self.faketmax - self.faketmin) / 2,
                     }
 
-
             self.result["TransientProcessingTime"] = time() - timeStamp
 
             if self.config.showDebug:
-                print("Number of \"good\" transients:", len(goodTransients))
+                print('Number of "good" transients:', len(goodTransients))
                 print("Processing time: ",
                       round(self.result["TransientProcessingTime"], 2), "s", sep="")
             return goodTransients, flags
 
-
-        goodTransients, flags = transCalc(self.config.innerRingScale,
-                                          self.config.outerRingScale,
-                                          self.config.transientBackgroundUncertainty)
+        goodTransients, _ = transCalc(self.config.innerRingScale,
+                                      self.config.outerRingScale,
+                                      self.config.transientBackgroundUncertainty)
 
         # Shows 2D and 3D distribution of photons belonging to transient
         def showTransient(photons, x, y, tmean, tdev, sigma, tcoeff, sigmacoeff, prob):
-            xi, yi, xa, ya = (x - sigmacoeff * sigma, y - sigmacoeff * sigma, x
-                              + sigmacoeff * sigma, y + sigmacoeff * sigma)
+            xi, yi, xa, ya = (x - sigmacoeff * sigma, y - sigmacoeff * sigma,
+                              x + sigmacoeff * sigma, y + sigmacoeff * sigma)
             pixels = np.zeros((xa - xi + 1, ya - yi + 1), dtype=int)
             pixelsTransient = np.zeros((xa - xi + 1, ya - yi + 1), dtype=float)
             photonsWithinFov = []
             for photon in photons:
                 if (xi <= photon[0] < xa and yi <= photon[1] < ya
-                    and abs(photon[2] - tmean) <= tdev * tcoeff):
+                        and abs(photon[2] - tmean) <= tdev * tcoeff):
                     arr = pixels
                     if ((photon[0] - x) ** 2 + (photon[1] - y) ** 2 <= sigma ** 2
                             and abs(photon[2] - tmean) <= tdev):
@@ -1008,11 +1043,12 @@ class TransientFinder:
                                 arr[int(photon[0] - xi + j), int(photon[1] - yi - k)] += 1
                                 arr[int(photon[0] - xi - j), int(photon[1] - yi - k)] += 1
                         arr[int(photon[0] - xi), int(photon[1] - yi)] += 1
-                    except:
+                    except Exception:
                         pass
             plt.xlabel(str(10 ** prob))
             plt.imshow(pixels, cmap="Greys", norm="asinh")
-            plt.imshow(pixelsTransient, alpha=pixelsTransient, cmap="Reds", norm="asinh")
+            plt.imshow(pixelsTransient, alpha=pixelsTransient.astype(bool).astype(float),
+                       cmap="Reds", norm="asinh")
             pixels = np.zeros((xa - xi + 1, ya - yi + 1), dtype=float)
             lineWidth = 2
             n, m = xa - xi + 1, ya - yi + 1
@@ -1028,7 +1064,7 @@ class TransientFinder:
             ys = [int(xi - i[0]) for i in photonsWithinFov]
             ts = [int(i[2] - t0) for i in photonsWithinFov]
             x1, y1, t1, x2, y2, t2 = [], [], [], [], [], []
-            for i in range(len(ts)):
+            for i, _ in enumerate(ts):
                 if ((xs[i] + yi - y) ** 2 + (xi - ys[i] - x) ** 2 <= sigma ** 2
                         and abs(ts[i] + t0 - tmean) <= tdev):
                     x1.append(xs[i])
@@ -1039,34 +1075,23 @@ class TransientFinder:
                     y2.append(ys[i])
                     t2.append(ts[i])
             x1, y1, t1, x2, y2, t2 = (np.asarray(i) for i in [x1, y1, t1, x2, y2, t2])
-            _, stemlines, _ = ax.stem(
-                x2,
-                y2,
-                t2,
-                linefmt=":",
-                basefmt=" ",
-                markerfmt="C1.",
-            )
-            ax.stem(
-                x1,
-                y1,
-                t1,
-                linefmt=":",
-                basefmt=" ",
-                markerfmt="C2."
-            )
+            _, stemlines, _ = ax.stem(x2, y2, t2, linefmt=":", basefmt=" ", markerfmt="C1.")
+            # ax.stem(x1, y1, t1, linefmt=":", basefmt=" ", markerfmt="C2.")
             # plt.setp(stemlines, visible=False)
             plt.show()
 
-
         coordinates = []
 
-        for k in range(len(goodTransients)):
+        for k, transient in enumerate(goodTransients):
             transient = goodTransients[k]
             if self.config.showTransients:
                 showTransient(events, int(transient[0]), int(transient[1]),
                               *transient[2:4], int(self.localPsf), 3, 3, transient[4])
             coordinates.append(tuple(transient[0:2]))
+
+        if self.config.showTransients:
+            self.showEvents(events, "Transients",
+                            xys=[(transient[0], transient[1]) for transient in goodTransients])
 
         self.result["CodeTime"] = time() - self.globalTimeStamp
 

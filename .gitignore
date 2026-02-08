@@ -7,3 +7,7 @@ __pycache__/
 sifting/build/
 cache/
 *.pyd
+config
+.gitignore
+test.sh
+*.so

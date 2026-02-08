@@ -1,23 +1,24 @@
-#include "Parser.h"
-#include "FenwickTree.h"
 #include "Sifting.h"
+#include "FenwickTree.h"
+#include "Parser.h"
+#include "optional"
 #include "set"
 
-std::vector<int> calcPhotons(Photon* photons, size_t n, double selectionTime, std::vector<bool> &chosenIndexes, int maxx, int maxy, int localPsf) {
+std::vector<int> calcPhotons(std::vector<Photon> &photons, size_t n, double selectionTime, std::vector<bool>& chosenIndexes, int maxx, int maxy, int localPsf) {
     bool f = selectionTime != 0;
     bool choose = chosenIndexes.size() != 0;
     if (f) {
         selectionTime /= 2.;
     }
-    Photon* arr = photons;
+    std::vector<Photon> arr = photons;
     if (f) {
-        arr = new Photon[0]();
+        arr.clear();
     }
     FenwickTree ft = FenwickTree(arr, (f) ? (0) : (n), maxx, maxy);
     std::vector<int> result = std::vector<int>(n);
     size_t left = 0;
     size_t right = 0;
-    int maxResult = 0;  
+    int maxResult = 0;
     for (size_t i = 0; i < n; ++i) {
         if (choose && !chosenIndexes[i]) {
             continue;
@@ -39,15 +40,12 @@ std::vector<int> calcPhotons(Photon* photons, size_t n, double selectionTime, st
         result[i] = ft.count(xy.first - localPsf, xy.first + localPsf, xy.second - localPsf, xy.second + localPsf);
         maxResult = std::max(maxResult, result[i]);
     }
-    if (f) {
-        delete[] arr;
-    }
     return result;
 }
 
 py::array_t<int> calc(std::vector<double> &x, std::vector<double> &y, std::vector<double> &time, int maxx, int maxy, int localPsf, std::vector<bool> &flags, double selectionTime) {
-    std::pair<Photon*, size_t> photonsN = getPhotons(x, y, time);
-    Photon* photons = photonsN.first;
+    std::pair<std::vector<Photon>, size_t> photonsN = getPhotons(x, y, time);
+    std::vector<Photon> photons = photonsN.first;
     size_t n = photonsN.second;
     std::vector<int> counts = calcPhotons(photons, n, selectionTime, flags, maxx, maxy, localPsf);
     return vector_as_array_nocopy(counts);
@@ -63,7 +61,7 @@ bool checkTime(double timem, double times, double timed, double timemin, double 
     return abs(times - timem) <= timed;
 }
 
-py::array_t<int> count(std::vector<double> &xm, std::vector<double> &ym, std::vector<double> &timem, std::vector<double> &timed, std::vector<double> &xs, std::vector<double> &ys, std::vector<double> &times, double localPsf, double innerSigmaCoefficient, double outerSigmaCoefficient, double timeCoefficient) {
+py::array_t<int> count(std::vector<double> &xm, std::vector<double> &ym, std::vector<double> &timem, std::vector<double> &timed, std::vector<bool> &gtis, std::vector<double> &xs, std::vector<double> &ys, std::vector<double> &times, double localPsf, double innerSigmaCoefficient, double outerSigmaCoefficient, double timeCoefficient) {
     size_t n = xm.size();
     std::vector<int> cnt = std::vector<int>(2 * n, 0);
 
@@ -83,9 +81,11 @@ py::array_t<int> count(std::vector<double> &xm, std::vector<double> &ym, std::ve
         for (int i = 0; i < xs.size(); ++i) {
             double r = sqrt((xs[i] - xm[j]) * (xs[i] - xm[j]) + (ys[i] - ym[j]) * (ys[i] - ym[j]));
             if (r <= localPsf && checkTime(timem[j], times[i], timed[j], timemin, timemax)) {
-                cnt[j] += 1;
-            } else if (localPsf * innerSigmaCoefficient < r && r <= localPsf * outerSigmaCoefficient && checkTime(timem[j], times[i], timed[j] * timeCoefficient, timemin, timemax)) {
-                cnt[j + n] += 1;
+                if (gtis[i]) {
+                    cnt[j] += 1;
+                } else {
+                    cnt[j + n] += 1;
+                }
             }
         }
     }
@@ -128,7 +128,7 @@ py::array_t<int> clustering(std::vector<double> &x, std::vector<double> &y, std:
             }
             prev = candidate;
             if ((x[start] - x[candidate]) * (x[start] - x[candidate])
-                + (y[start] - y[candidate]) * (y[start] - y[candidate]) <= localPsf * localPsf) {
+                    + (y[start] - y[candidate]) * (y[start] - y[candidate]) <= localPsf * localPsf) {
                 cluster[candidate] = groupNum;
                 eventsLeft--;
                 right = prev;
@@ -149,7 +149,7 @@ py::array_t<int> clustering(std::vector<double> &x, std::vector<double> &y, std:
             }
             prev = candidate;
             if ((x[start] - x[candidate]) * (x[start] - x[candidate])
-                + (y[start] - y[candidate]) * (y[start] - y[candidate]) <= localPsf * localPsf) {
+                    + (y[start] - y[candidate]) * (y[start] - y[candidate]) <= localPsf * localPsf) {
                 cluster[candidate] = groupNum;
                 eventsLeft--;
                 left = prev;
