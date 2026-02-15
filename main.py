@@ -3,19 +3,22 @@ from time import time
 import sys
 import traceback
 from copy import deepcopy
-import gc
 import os
+from math import log10
 from urllib.request import urlretrieve
 from tqdm import tqdm
 import pandas as pd
 import Calc
+from Vision import Vision
 
 panic = None
 args = {
     "XMMMaster": r"https://nxsa.esac.esa.int/ftp_public/heasarc_obslog/xsaobslog.txt",
     "allowedModes": "PN-FF, PN-EFF, PN-LW, PN-SW, PN-FMK",
     "debug": "n",
+    "reviewModes": "Unreviewed, Unsure",
 }
+form = (lambda x: (f"{x:.6f}") if (type(x) is float) else x)
 
 
 class Task:
@@ -47,7 +50,6 @@ class Task:
                         cntFail += 1
                 del tf
                 filelock.release()
-                gc.collect()
         except Exception:
             filelock.acquire()
             onException(filepath, self.ID)
@@ -63,13 +65,16 @@ class Task:
 
     @staticmethod
     def processingOnSuccess(result, filepath, ID):
+        global form
         with open(filepath, "a") as file:
             print(f"#{ID} {round(result['CodeTime'])}", file=file)
             for transient in result["transients"]:
-                print(*[ transient[val] for val in ["x", "y", "tmean", "tdev",
+                transient["prob"] = log10(transient["prob"])
+                print(*[form(transient[val]) for val in ["x", "y", "tmean", "tdev",
+                                                    "ra", "dec", "timebegin",
                                                     "cntGTI", "backgroundGTI",
                                                     "cntBTI", "backgroundBTI",
-                                                    "prob"]], file=file)
+                                                    "prob"]], sep="\t", file=file)
 
     @staticmethod
     def processingOnFail(result, filepath, ID):
@@ -211,17 +216,17 @@ def getObservationIDs():
     global args
     if "observations" not in args:
         raise FileNotFoundError('No "observations" file is provided.')
-    
+
     obsIDs = None
     with open(args["observations"], "r") as file:
         obsIDs = list(map(lambda x: x.split()[0].strip(), file.readlines()))
 
-    if "transients" in args:
+    if "processed" in args:
         result = []
         exclude = set()
         lines = []
-        if os.path.isfile(args["transients"]):
-            with open(args["transients"], "r") as file:
+        if os.path.isfile(args["processed"]):
+            with open(args["processed"], "r") as file:
                 for line in file.readlines():
                     if line[0] == "#":
                         exclude.add(line.split()[0].strip()[1:])
@@ -234,13 +239,80 @@ def getObservationIDs():
         for ID in obsIDs:
             if ID not in exclude:
                 result.append(ID)
-        with open(args["transients"], "w") as file:
+        with open(args["processed"], "w") as file:
             for line in lines:
                 print(line, file=file)
         obsIDs = result
 
     return obsIDs
 
+
+def extractTransients(processedFile, transientsFile):
+    transients = []
+    observationID = None
+    with open(processedFile, "r") as file:
+        for row in file.readlines():
+            if row[0] == '#':
+                observationID = row.split()[0][1:]
+            elif row[0] == '!' or row[0] == '~':
+                continue
+            else:
+                transients.append(tuple([observationID] + row.split() + ["Unreviewed"]))
+
+    if os.path.isfile(transientsFile):
+        with open(transientsFile, "r") as file:
+            for row in file.readlines():
+                transients.append(tuple(row.split()))
+
+    with open(transientsFile, "w") as file:
+        for transient in transients:
+            print(*transient, sep="\t", file=file)
+
+
+def reviewTransients(transientsFile, reviewModes):
+    transients = {}
+    reviewModes = list(map(lambda x: x.strip(), reviewModes.split(",")))
+    with open(transientsFile, "r") as file:
+        for row in file:
+            tr = row.split()
+            if tr[-1] not in reviewModes:
+                continue
+            if tr[0] not in transients:
+                transients[tr[0]] = []
+            transients[tr[0]].append(tr[1:])
+
+    config = Calc.Config()
+    for obsID, currtransients in transients.items():
+        tf = Calc.TransientFinder(obsID, config)
+        try:
+            tf.getDetections(obsID)
+        except Exception:
+            print("Network error is occured during {obsID} review.")
+        events = None
+        try:
+            events = tf.getEvents(obsID)
+        except Exception:
+            print("PIEVLI error is occured during {obsID} review.")
+
+        visualiserTransients = []
+        for transient in currtransients:
+            visualiserTransients.append({
+                "x": float(transient[0]),
+                "y":float(transient[1]),
+                "tmean": float(transient[2]),
+                "tdev": float(transient[3]),
+            })
+        visualiser = Vision(events, tf.bincount, tf.picPsf, tf.localToPic)
+        visualiser.addTransients(visualiserTransients)
+        visualiser.initGUI(True)
+        verdicts = visualiser.transientsVerdict
+        for i, verdict in enumerate(verdicts):
+            currtransients[i][-1] = verdict
+
+        with open(transientsFile, "w") as file:
+            for observation, trs in transients.items():
+                for transient in trs:
+                    print(observation, *transient, sep="\t", file=file)
 
 if __name__ == "__main__":
     obsIDs = [
@@ -281,9 +353,9 @@ if __name__ == "__main__":
         getObservations()
     elif mode == "process":
         obsIDs = getObservationIDs()
-        if "transients" not in args:
-            raise FileNotFoundError('No "transients" file is provided.')
-        processImages(obsIDs, coreNumber, conf, lock, args["transients"], panic)
+        if "processed" not in args:
+            raise FileNotFoundError('No "processed" file is provided.')
+        processImages(obsIDs, coreNumber, conf, lock, args["processed"], panic)
     elif mode == "image":
         if "ID" not in args:
             raise ValueError('No observation "ID" is provided.')
@@ -291,21 +363,30 @@ if __name__ == "__main__":
         tf.process()
         print(tf.result)
         del tf
-        gc.collect()
     elif mode == "test":
         obsIDs = getObservationIDs()
         if "result" not in args:
             raise FileNotFoundError('No "result" file is provided.')
         if "durations" not in args:
-            raise FileNotFoundError('No "durations" are provided')
+            raise FileNotFoundError('No "durations" are provided.')
         if "probs" not in args:
-            raise FileNotFoundError('No "probs" are provided')
+            raise FileNotFoundError('No "probs" are provided.')
         if "repeat" not in args:
             raise FileNotFoundError('No "repeat" number is provided')
         fakeImages(obsIDs, coreNumber, conf, lock, args["result"], panic,
-                   args["durations"], args["probs"], args["repeat"], )
+                   args["durations"], args["probs"], args["repeat"])
+    elif mode == "extract":
+        if "processed" not in args:
+            raise FileNotFoundError('No "processed" file is provided.')
+        if "transients" not in args:
+            raise FileNotFoundError('No "transients" file is provided.')
+        extractTransients(args["processed"], args["transients"])
+    elif mode == "review":
+        if "transients" not in args:
+            raise FileNotFoundError('No "transients" file is provided')
+        reviewTransients(args["transients"], args["reviewModes"])
     else:
         raise ValueError(f"Unknown mode: {mode}.")
 
     print(f"Time: {round(time() - timeStamp)} s")
-    exit(0)
+    sys.exit(0)

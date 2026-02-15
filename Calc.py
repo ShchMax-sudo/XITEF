@@ -7,6 +7,8 @@ from random import choice, random
 import sys
 from scipy.stats import poisson
 from astropy.io import fits
+from astropy.time import Time
+import astropy.units as u
 import matplotlib.pyplot as plt
 import numpy as np
 from astroquery.esa.xmm_newton import XMMNewton
@@ -251,6 +253,7 @@ class TransientFinder:
         self.refx, self.refy = None, None                                                                               # Local coordinates of LOS
         self.xdel, self.ydel = None, None                                                                               # Angular measure of one local pixel (coordinates per degree)
         self.raref, self.decref = None, None                                                                            # FK5 coordinates of LOS (degrees)
+        self.observationBegin = None                                                                                    # Date of exposure beggining
         self.picPsf = None                                                                                              # Point Spread Function radius in units of picture pixels
         self.localPsf = None                                                                                            # Point Spread Function Radius in units of local pixels
         self.observationPeriod = None                                                                                   # Period between the earliest and the latest photons detected
@@ -333,6 +336,13 @@ class TransientFinder:
                 os.rename(ftz_path, path + "OBSMLI.FTZ")
                 shutil.rmtree(self.workDir + "/" + observationID)
 
+    # Removes unnecessary files
+    @staticmethod
+    def removeDetections(observationID):
+        directory = os.getcwd() + "/data/" + observationID
+        if os.path.exists(directory):
+            shutil.rmtree(directory)
+
     # Creates a picture of given stars
     def showStars(self, starsPos):
         pixels = np.zeros((self.bincount, self.bincount), dtype=float)
@@ -363,6 +373,7 @@ class TransientFinder:
         self.distanceCheck = (
             lambda e1, e2: TransientFinder.distanceCheckGeneral(e1, e2,
                                                                 self.localPsf))                                         # Checks if events are in one PSF (taxicab type)
+        self.observationBegin = Time(header["DATE-OBS"], format="isot", scale="tt")
 
     # Converts the local telescope XY coordinates to FK5 RA DEC coordinates
     def localToFK5(self, x, y):
@@ -684,16 +695,20 @@ class TransientFinder:
     # Adds transient to program result variable
     def addTransientToResult(self, x, y, tmean, tdev, cntgti, backgroundgti,
                              cntbti, backgroundbti, prob):
+        ra, dec = self.localToFK5(x, y)
         self.result["transients"].append({
             "x": float(x),
             "y": float(y),
             "tmean": float(tmean),
             "tdev": float(tdev),
+            "timebegin": (self.observationBegin + u.s * (float(tmean) - float(tdev))).isot,
             "cntGTI": int(cntgti),
             "backgroundGTI": float(backgroundgti),
             "cntBTI": int(cntbti),
             "backgroundBTI": float(backgroundbti),
             "prob": float(prob),
+            "ra": float(ra),
+            "dec": float(dec),
         })
 
     # More human readable str() function for integers
