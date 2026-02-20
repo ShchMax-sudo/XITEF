@@ -314,6 +314,59 @@ def reviewTransients(transientsFile, reviewModes):
                 for transient in trs:
                     print(observation, *transient, sep="\t", file=file)
 
+def downloadFiles(obsIDs):
+    config = Calc.Config
+    config.removeStars = True
+
+    def downloadObservation(ID):
+        tf = Calc.TransientFinder(ID, config)
+        try:
+            tf.getDetections(ID)
+        except Exception:
+            pass
+        del tf
+    with Pool(1) as pool:
+        list(tqdm(pool.imap_unordered(downloadObservation, obsIDs), total=len(obsIDs)))
+
+def catalogueFiles(cataloguefile, coreNum, lock):
+    config = Calc.Config
+    config.removeStars = True
+
+    observations = next(os.walk(os.getcwd() + "/data/"), (None, [], None))[1]
+
+    open(cataloguefile, "w").close()
+
+    def checkObservation(args):
+        ID, filelock, config, cataloguefile = args
+        tf = Calc.TransientFinder(ID, config)
+        verdict = ""
+        try:
+            events = tf.getEvents(ID)
+            try:
+                tf.removeStars(events, ID, show=False)
+                verdict = "PO"
+            except Exception:
+                verdict = "Po"
+        except Exception:
+            verdict = "p"
+        del tf
+        filelock.acquire()
+        with open(cataloguefile, "a") as file:
+            print(ID, verdict, sep="\t", file=file)
+        filelock.release()
+
+    with Pool(coreNum) as pool:
+        list(
+            tqdm(
+                pool.imap_unordered(
+                    checkObservation,
+                    [(ID, lock, config, cataloguefile) for ID in observations],
+                ),
+                total=len(observations),
+            )
+        )
+
+
 if __name__ == "__main__":
     obsIDs = [
         "0303110101",
@@ -385,6 +438,13 @@ if __name__ == "__main__":
         if "transients" not in args:
             raise FileNotFoundError('No "transients" file is provided')
         reviewTransients(args["transients"], args["reviewModes"])
+    elif mode == "download":
+        obsIDs = getObservationIDs()
+        downloadFiles(obsIDs)
+    elif mode == "catalogue":
+        if "catalogue" not in args:
+            raise FileNotFoundError('No "catalogue" file is provided')
+        catalogueFiles(args["catalogue"], coreNumber, lock)
     else:
         raise ValueError(f"Unknown mode: {mode}.")
 

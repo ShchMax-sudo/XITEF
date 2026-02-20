@@ -54,7 +54,7 @@ class Vision:
         self.transientsVerdict = []
         self.updateTransient()
 
-    def showEvents(self, photons=None, gamma=0.7, xys=None, redSquareSize=1, plot=plt):
+    def showEvents(self, photons=None, gamma=0.7, xys=None, redSquareSize=1, plot=plt, imageOnly=False):
         if photons is None:
             photons = self.events
         if xys is None:
@@ -63,9 +63,19 @@ class Vision:
         for event in photons:
             x, y = self.localToPic(event)
             pixels[x, y] += 1
+        xmin, xmax = self.bincount, 0
+        ymin, ymax = self.bincount, 0
         for i in range(self.bincount):
             for j in range(self.bincount):
+                if pixels[i, j] != 0:
+                    xmin = min(xmin, i)
+                    xmax = max(xmax, i)
+                    ymin = min(ymin, j)
+                    ymax = max(ymax, j)
                 pixels[i, j] = (pixels[i, j] ** (1 - gamma))
+        if imageOnly:
+            plot.set_axis_off()
+            pixels = pixels[xmin:xmax + 1, ymin:ymax + 1]
         plot.imshow(pixels, cmap="Greys")
         pixels = np.zeros((self.bincount, self.bincount), dtype=float)
         Psf = round(self.picPsf * redSquareSize)
@@ -76,6 +86,8 @@ class Vision:
                 pixels[x + Psf, y + k] = 1
                 pixels[x + k, y - Psf] = 1
                 pixels[x + k, y + Psf] = 1
+        if imageOnly:
+            pixels = pixels[xmin:xmax + 1, ymin:ymax + 1]
         if xys:
             plot.imshow(pixels, alpha=pixels, cmap="Reds")
         if plot == plt:
@@ -165,10 +177,12 @@ class Vision:
             self.firstTimeTrim()
         self.fig.clear()
         plot = self.fig.add_subplot()
+        self.fig.subplots_adjust(left=0.0, right=1.0, bottom=0.0, top=1.0)
         if self.mode == "Image":
             self.showEvents(photons=self.timedEvents,
                             gamma=self.checkRange(self.brightnessEntry, 0, 1),
-                            plot=plot, xys=self.activeTransients, redSquareSize=3)
+                            plot=plot, xys=self.activeTransients, redSquareSize=3,
+                            imageOnly=(self.timeEntry2 is None))
         elif self.mode == "Hist":
             binNum = self.checkRange(self.binNumEntry, 0, self.duration)
             args = {}
