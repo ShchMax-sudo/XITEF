@@ -314,19 +314,22 @@ def reviewTransients(transientsFile, reviewModes):
                 for transient in trs:
                     print(observation, *transient, sep="\t", file=file)
 
+def downloadObservation(args):
+    ID, config = args
+    tf = Calc.TransientFinder(ID, config)
+    try:
+        tf.getDetections(ID)
+    except Exception:
+        pass
+    del tf
+
 def downloadFiles(obsIDs):
     config = Calc.Config
     config.removeStars = True
+    observations = [(ID, config) for ID in obsIDs]
 
-    def downloadObservation(ID):
-        tf = Calc.TransientFinder(ID, config)
-        try:
-            tf.getDetections(ID)
-        except Exception:
-            pass
-        del tf
     with Pool(1) as pool:
-        list(tqdm(pool.imap_unordered(downloadObservation, obsIDs), total=len(obsIDs)))
+        list(tqdm(pool.imap_unordered(downloadObservation, observations), total=len(obsIDs)))
 
 def catalogueFiles(cataloguefile, coreNum, lock):
     config = Calc.Config
