@@ -5,6 +5,7 @@ from math import floor, cos, sin, pi, ceil, log, sqrt, radians, exp
 from time import time
 from random import choice, random
 import sys
+import traceback
 from scipy.stats import poisson
 from astropy.io import fits
 from astropy.time import Time
@@ -18,6 +19,7 @@ sys.path.append("sifting")
 
 import sifting
 
+np.seterr(divide = 'ignore')
 
 class Config:
     def __init__(self):
@@ -318,14 +320,14 @@ class TransientFinder:
             os.mkdir(self.workDir + "/data/" + observationID)
         path = self.workDir + "/data/" + observationID + "/"
         if not os.path.exists(path + "PIEVLI.FTZ"):
-            XMMNewton.download_data(observationID, filename="PIEVLI.FTZ",
+            XMMNewton.download_data(observationID, filename=f"PIEVLI{observationID}.FTZ",
                                     level="PPS", extention="FTZ", name="PIEVLI")
-            os.rename(self.workDir + "/PIEVLI.FTZ", path + "PIEVLI.FTZ")
+            os.rename(self.workDir + f"/PIEVLI{observationID}.FTZ", path + "PIEVLI.FTZ")
         if self.config.removeStars:
             if not os.path.exists(path + "OBSMLI.tar"):
-                XMMNewton.download_data(observationID, filename="OBSMLI.tar",
+                XMMNewton.download_data(observationID, filename=f"OBSMLI{observationID}.tar",
                                         level="PPS", extention="FTZ", name="OBSMLI")
-                os.rename(self.workDir + "/OBSMLI.tar", path + "OBSMLI.tar")
+                os.rename(self.workDir + f"/OBSMLI{observationID}.tar", path + "OBSMLI.tar")
             tar = tarfile.open(path + "OBSMLI.tar", "r")
             if not os.path.exists(path + "OBSMLI.FTZ"):
                 for member in tar.getmembers():
@@ -734,12 +736,14 @@ class TransientFinder:
             self.getDetections(self.obsID)
         except Exception:
             self.result["type"] = "NetworkError"
+            self.result["traceback"] = traceback.format_exc()
             return
         events = None
         try:
             events = self.getEvents(self.obsID)
         except Exception:
             self.result["type"] = "PIEVLIError"
+            self.result["traceback"] = traceback.format_exc()
             return
         if self.config.showDebug:
             self.showEvents(events, "Image before processing")
@@ -751,6 +755,7 @@ class TransientFinder:
                 events = self.removeStars(events, self.obsID, show=False)
         except Exception:
             self.result["type"] = "OBSMLIError"
+            self.result["traceback"] = traceback.format_exc()
             return
         size2 = len(events)
         if self.config.showDebug:

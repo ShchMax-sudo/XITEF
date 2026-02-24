@@ -270,12 +270,14 @@ def extractTransients(processedFile, transientsFile):
 
 
 def reviewTransients(transientsFile, reviewModes):
+    cachetransients = []
     transients = {}
     reviewModes = list(map(lambda x: x.strip(), reviewModes.split(",")))
     with open(transientsFile, "r") as file:
         for row in file:
             tr = row.split()
             if tr[-1] not in reviewModes:
+                cachetransients.append(row)
                 continue
             if tr[0] not in transients:
                 transients[tr[0]] = []
@@ -291,6 +293,8 @@ def reviewTransients(transientsFile, reviewModes):
         events = None
         try:
             events = tf.getEvents(obsID)
+            events = tf.removeBadEvents(events)
+            events = tf.timeSort(events)
         except Exception:
             print("PIEVLI error is occured during {obsID} review.")
 
@@ -310,6 +314,8 @@ def reviewTransients(transientsFile, reviewModes):
             currtransients[i][-1] = verdict
 
         with open(transientsFile, "w") as file:
+            for row in cachetransients:
+                print(row, end="", file=file)
             for observation, trs in transients.items():
                 for transient in trs:
                     print(observation, *transient, sep="\t", file=file)
@@ -324,39 +330,39 @@ def downloadObservation(args):
     del tf
 
 def downloadFiles(obsIDs):
-    config = Calc.Config
+    config = Calc.Config()
     config.removeStars = True
     observations = [(ID, config) for ID in obsIDs]
 
     with Pool(1) as pool:
         list(tqdm(pool.imap_unordered(downloadObservation, observations), total=len(obsIDs)))
 
+def checkObservation(args):
+    ID, filelock, config, cataloguefile = args
+    tf = Calc.TransientFinder(ID, config)
+    verdict = ""
+    try:
+        events = tf.getEvents(ID)
+        try:
+            tf.removeStars(events, ID, show=False)
+            verdict = "PO"
+        except Exception:
+            verdict = "Po"
+    except Exception:
+        verdict = "p"
+    del tf
+    filelock.acquire()
+    with open(cataloguefile, "a") as file:
+        print(ID, verdict, sep="\t", file=file)
+    filelock.release()
+
 def catalogueFiles(cataloguefile, coreNum, lock):
-    config = Calc.Config
+    config = Calc.Config()
     config.removeStars = True
 
     observations = next(os.walk(os.getcwd() + "/data/"), (None, [], None))[1]
 
     open(cataloguefile, "w").close()
-
-    def checkObservation(args):
-        ID, filelock, config, cataloguefile = args
-        tf = Calc.TransientFinder(ID, config)
-        verdict = ""
-        try:
-            events = tf.getEvents(ID)
-            try:
-                tf.removeStars(events, ID, show=False)
-                verdict = "PO"
-            except Exception:
-                verdict = "Po"
-        except Exception:
-            verdict = "p"
-        del tf
-        filelock.acquire()
-        with open(cataloguefile, "a") as file:
-            print(ID, verdict, sep="\t", file=file)
-        filelock.release()
 
     with Pool(coreNum) as pool:
         list(
@@ -417,6 +423,9 @@ if __name__ == "__main__":
             raise ValueError('No observation "ID" is provided.')
         tf = Calc.TransientFinder(args["ID"], conf)
         tf.process()
+        if "traceback" in tf.result:
+            print(tf.result["traceback"])
+            tf.result.pop("traceback")
         print(tf.result)
         del tf
     elif mode == "test":
